@@ -86,6 +86,26 @@ def _get_fields_by_mro(klass: SchemaMeta):
     )
 
 
+def _validate_unique_by(
+    unique_by: types.StrSequenceOrSet | str,
+) -> tuple[str, ...]:
+    """Normalize and validate the ``unique_by`` option.
+
+    :param unique_by: A field name or a sequence of field names.
+    :return: A tuple of field names.
+    """
+    if isinstance(unique_by, str):
+        return (unique_by,)
+    if isinstance(unique_by, (list, tuple)) and all(
+        isinstance(field_name, str) for field_name in unique_by
+    ):
+        return tuple(unique_by)
+    raise ValueError(
+        "`unique_by` must be a string or a list/tuple of strings, "
+        f"not {unique_by.__class__.__name__}."
+    )
+
+
 class SchemaMeta(ABCMeta):
     """Metaclass for the Schema class. Binds the declared fields to
     a ``_declared_fields`` attribute, which is a dictionary mapping attribute
@@ -220,6 +240,9 @@ class SchemaOpts:
         self.unknown = getattr(meta, "unknown", RAISE)
         self.register = getattr(meta, "register", True)
         self.many = getattr(meta, "many", False)
+        self.unique_by = getattr(meta, "unique_by", None)
+        if self.unique_by is not None:
+            self.unique_by = _validate_unique_by(self.unique_by)
 
 
 class Schema(metaclass=SchemaMeta):
@@ -302,6 +325,10 @@ class Schema(metaclass=SchemaMeta):
     _default_error_messages: dict[str, str] = {
         "type": "Invalid input type.",
         "unknown": "Unknown field.",
+        "duplicate_identity": (
+            "Duplicate identity for unique_by fields {fields!r} at indices {indices!r}."
+        ),
+        "duplicate_identity_item": "Duplicate identity.",
     }
 
     OPTIONS_CLASS: type = SchemaOpts
@@ -375,6 +402,12 @@ class Schema(metaclass=SchemaMeta):
         """
         many: typing.ClassVar[bool]
         """Whether data should be (de)serialized as a collection by default."""
+        unique_by: typing.ClassVar[str | tuple[str, ...] | list[str] | None]
+        """A field name or sequence of field names whose deserialized values
+        identify a record within a collection. When set, loading a collection
+        raises a `ValidationError <marshmallow.exceptions.ValidationError>` if
+        two or more records share the same identity.
+        """
         dateformat: typing.ClassVar[str]
         """Default format for `Date <marshmallow.fields.Date>` fields."""
         datetimeformat: typing.ClassVar[str]
@@ -424,6 +457,7 @@ class Schema(metaclass=SchemaMeta):
         # copy declared fields from metaclass
         self.declared_fields = copy.deepcopy(self._declared_fields)
         self.many = self.opts.many if many is None else many
+        self.unique_by = self.opts.unique_by
         self.only = only
         self.exclude: set[typing.Any] | typing.MutableSet[typing.Any] = set(
             self.opts.exclude
@@ -711,6 +745,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        unique_by: types.StrSequenceOrSet | str | None = None,
     ):
         """Deserialize a data structure to an object defined by this Schema's fields.
 
@@ -724,6 +759,13 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param unique_by: A field name or sequence of field names whose
+            deserialized values identify a record within a collection. When
+            set (or configured via `Meta.unique_by <marshmallow.Schema.Meta.unique_by>`),
+            loading a collection raises a `ValidationError` if two or more
+            records share the same identity. Every index sharing a duplicate
+            identity is reported. If `None`, the value for `self.unique_by`
+            is used.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
@@ -732,7 +774,12 @@ class Schema(metaclass=SchemaMeta):
             if invalid data are passed.
         """
         return self._do_load(
-            data, many=many, partial=partial, unknown=unknown, postprocess=True
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            postprocess=True,
+            unique_by=unique_by,
         )
 
     def loads(
@@ -743,6 +790,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        unique_by: types.StrSequenceOrSet | str | None = None,
         **kwargs,
     ):
         """Same as :meth:`load`, except it uses `marshmallow.Schema.Meta.render_module` to deserialize
@@ -758,6 +806,9 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param unique_by: A field name or sequence of field names whose
+            deserialized values identify a record within a collection. If
+            `None`, the value for `self.unique_by` is used.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
@@ -768,7 +819,13 @@ class Schema(metaclass=SchemaMeta):
             Rename ``json_module`` parameter to ``s``.
         """
         data = self.opts.render_module.loads(s, **kwargs)
-        return self.load(data, many=many, partial=partial, unknown=unknown)
+        return self.load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            unique_by=unique_by,
+        )
 
     def _run_validator(
         self,
@@ -847,6 +904,7 @@ class Schema(metaclass=SchemaMeta):
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
         postprocess: bool = True,
+        unique_by: types.StrSequenceOrSet | str | None = None,
     ):
         """Deserialize `data`, returning the deserialized result.
         This method is private API.
@@ -870,6 +928,10 @@ class Schema(metaclass=SchemaMeta):
         unknown = self.unknown if unknown is None else unknown
         if partial is None:
             partial = self.partial
+        if unique_by is None:
+            unique_by_value: tuple[str, ...] | None = self.unique_by
+        else:
+            unique_by_value = _validate_unique_by(unique_by)
         # Run preprocessors
         if self._hooks[PRE_LOAD]:
             try:
@@ -898,6 +960,13 @@ class Schema(metaclass=SchemaMeta):
             # Run field-level validation
             self._invoke_field_validators(
                 error_store=error_store, data=result, many=many
+            )
+            # Check for duplicate identities before post_load callbacks run.
+            self._check_unique_by(
+                result,
+                error_store=error_store,
+                many=many,
+                unique_by=unique_by_value,
             )
             # Run schema-level validation
             if self._hooks[VALIDATES_SCHEMA]:
@@ -942,6 +1011,88 @@ class Schema(metaclass=SchemaMeta):
             raise exc
 
         return result
+
+    def _check_unique_by(
+        self,
+        result: typing.Any,
+        *,
+        error_store: ErrorStore,
+        many: bool,
+        unique_by: tuple[str, ...] | None,
+    ) -> None:
+        """Check a deserialized collection for duplicate identities.
+
+        The identity of each record is computed from the deserialized
+        (post-conversion) values of the fields listed in ``unique_by``.
+        Records whose identity is incomplete -- because an identity field
+        is missing, null, or failed conversion -- are skipped, so they are
+        never silently grouped into the same valid identity.
+
+        Every index that shares a duplicate identity is reported, using the
+        original input indices (indices are not shifted when invalid records
+        are filtered out). Field errors and identity errors are aggregated
+        into the same :class:`ErrorStore <marshmallow.error_store.ErrorStore>`,
+        so a duplicate check failure prevents ``post_load`` callbacks from
+        running.
+
+        This method is private API.
+
+        :param result: The deserialized collection (a list of dicts).
+        :param error_store: Structure to store errors.
+        :param many: Whether ``result`` is a collection.
+        :param unique_by: The normalized field names to check, or ``None``.
+        """
+        if not many or unique_by is None:
+            return
+        unique_fields = [
+            (field_name, self.load_fields[field_name]) for field_name in unique_by
+        ]
+        # identity -> first index at which it was seen
+        seen: dict[tuple, int] = {}
+        # identity -> indices of subsequent duplicates
+        duplicates: dict[tuple, list[int]] = defaultdict(list)
+        for idx, item in enumerate(result):
+            identity_values: list[typing.Any] = []
+            valid = True
+            for field_name, field_obj in unique_fields:
+                key = field_obj.attribute or field_name
+                value = item.get(key, missing)
+                if value is missing or value is None:
+                    # Missing, null, or failed conversion: this record does
+                    # not have a complete valid identity, so skip it.
+                    valid = False
+                    break
+                identity_values.append(value)
+            if not valid:
+                continue
+            identity = tuple(identity_values)
+            if identity in seen:
+                duplicates[identity].append(idx)
+            else:
+                seen[identity] = idx
+        field_names = tuple(unique_by)
+        for identity, indices in duplicates.items():
+            all_indices = [seen[identity], *indices]
+            error_store.store_error(
+                [
+                    self.error_messages["duplicate_identity"].format(
+                        fields=field_names, indices=all_indices
+                    )
+                ],
+                SCHEMA,
+            )
+            for idx in all_indices:
+                for field_name, field_obj in unique_fields:
+                    data_key = (
+                        field_obj.data_key
+                        if field_obj.data_key is not None
+                        else field_name
+                    )
+                    error_store.store_error(
+                        [self.error_messages["duplicate_identity_item"]],
+                        data_key,
+                        index=idx,
+                    )
 
     def _normalize_nested_options(self) -> None:
         """Apply then flatten nested schema options.
@@ -1051,6 +1202,14 @@ class Schema(metaclass=SchemaMeta):
         self.fields = fields_dict
         self.dump_fields = dump_fields
         self.load_fields = load_fields
+
+        if self.unique_by is not None:
+            for field_name in self.unique_by:
+                if field_name not in load_fields:
+                    raise ValueError(
+                        f"Invalid unique_by field for {self}: "
+                        f"{field_name!r} is not a load field."
+                    )
 
     def on_bind_field(self, field_name: str, field_obj: Field) -> None:
         """Hook to modify a field when it is bound to the `Schema <marshmallow.Schema>`.

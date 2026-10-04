@@ -6,6 +6,12 @@ Changelog
 
 Features:
 
+- Add ``unique_by`` option to `Schema.Meta <marshmallow.Schema.Meta>` and
+  ``unique_by`` argument to `Schema.load <marshmallow.Schema.load>` for
+  detecting duplicate records in a collection. Record identity is computed
+  from the deserialized values of the listed fields, and every index sharing
+  a duplicate identity is reported. The check runs before ``post_load``
+  callbacks and aggregates with field errors.
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:

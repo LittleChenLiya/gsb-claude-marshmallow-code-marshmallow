@@ -215,6 +215,53 @@ When validating a collection, the errors dictionary will be keyed on the indices
         # {1: {'email': ['Not a valid email address.']},
         #  3: {'name': ['Missing data for required field.']}}
 
+You can enforce that records in a collection are unique with respect to one or
+more fields by setting the `unique_by <marshmallow.Schema.Meta.unique_by>`
+option in the `class Meta <marshmallow.Schema.Meta>` of your schema. The
+identity of each record is computed from the *deserialized* (post-conversion)
+values of the listed fields, so ``"1"`` and ``1`` are treated as the same
+identity when the field is an `Integer <marshmallow.fields.Integer>`. When a
+duplicate is found, every index sharing the identity is reported, and the
+``post_load`` object-construction callbacks are not run.
+
+.. code-block:: python
+
+    from pprint import pprint
+
+    from marshmallow import Schema, fields, ValidationError
+
+
+    class BandMemberSchema(Schema):
+        class Meta:
+            unique_by = ("email",)
+
+        name = fields.String(required=True)
+        email = fields.Email()
+
+
+    user_data = [
+        {"email": "mick@stones.com", "name": "Mick"},
+        {"email": "mick@stones.com", "name": "Keith"},  # duplicate email
+    ]
+
+    try:
+        BandMemberSchema(many=True).load(user_data)
+    except ValidationError as err:
+        pprint(err.messages)
+        # {'_schema': ["Duplicate identity for unique_by fields ('email',) at indices [0, 1]."],
+        #  0: {'email': ['Duplicate identity.']},
+        #  1: {'email': ['Duplicate identity.']}}
+
+A record whose identity field is missing, null, or failed conversion is not
+silently grouped into the same valid identity; such records are skipped by the
+uniqueness check and their field errors are reported alongside any duplicate
+errors. The reported indices always refer to the original input positions, so
+a duplicate at index 2 is reported as ``2`` even when an earlier record was
+filtered out due to a field error.
+
+``unique_by`` may also be a single field name, and it can be overridden per
+call with the ``unique_by`` argument to `load <marshmallow.Schema.load>`.
+
 You can perform additional validation for a field by passing the ``validate`` argument.
 There are a number of built-in validators in the :ref:`marshmallow.validate <api_validators>` module.
 
