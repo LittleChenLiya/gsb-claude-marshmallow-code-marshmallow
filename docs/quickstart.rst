@@ -169,6 +169,59 @@ Set ``many=True`` when dealing with iterable collections of objects.
     #   'created_at': '2014-08-17T14:58:57.600623+00:00'}]
 
 
+.. _unique_by:
+
+Enforcing uniqueness across a collection
+----------------------------------------
+
+Declare ``unique_by`` (in `class Meta <Schema.Meta>` or as a constructor
+argument) to reject collections in which two records share the same identity.
+Identity is computed from the *deserialized* values of the declared fields, so
+``"1"`` and ``1`` collide for an `Integer <fields.Integer>` field. Field
+paths follow the schema's ``data_key`` mapping.
+
+.. code-block:: python
+
+    from marshmallow import Schema, fields, ValidationError
+
+
+    class LineItemSchema(Schema):
+        tenant = fields.Str()
+        id = fields.Int(data_key="lineId")
+
+        class Meta:
+            unique_by = ("tenant", "id")
+
+
+    schema = LineItemSchema(many=True)
+    try:
+        schema.load(
+            [
+                {"tenant": "a", "lineId": "1"},
+                {"tenant": "b", "lineId": 1},  # different tenant: not a duplicate
+                {"tenant": "a", "lineId": 1},  # duplicate of index 0
+            ]
+        )
+    except ValidationError as err:
+        pprint(err.messages)
+        # {0: {'_schema': ["Duplicate record for unique field(s) "
+        #                  "('tenant', 'lineId'): identical values at "
+        #                  "indices [0, 2]."]},
+        #  2: {'_schema': ["Duplicate record for unique field(s) "
+        #                  "('tenant', 'lineId'): identical values at "
+        #                  "indices [0, 2]."]}}
+
+The duplicate check runs before `post_load <marshmallow.decorators.post_load>`
+processors, so no objects are constructed from a collection containing
+duplicates. Records with a missing, ``None``, or unconvertible ``unique_by``
+value are reported individually and are never silently merged into a shared
+identity. Nested schemas declared with ``many=True`` check their own
+collections independently. Schemas that do not declare ``unique_by`` are
+unaffected.
+
+.. versionadded:: 4.4.0
+
+
 .. _validation:
 
 Validation

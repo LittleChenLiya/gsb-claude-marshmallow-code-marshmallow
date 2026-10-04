@@ -6,6 +6,13 @@ Changelog
 
 Features:
 
+- Add ``unique_by`` contract for ``many`` loads. Declare it in
+  `class Meta <marshmallow.Schema.Meta>` or pass it to the
+  `Schema <marshmallow.Schema>` constructor to reject collections where two
+  records share the same identity, computed from the deserialized values of
+  the declared fields. All original input indices of a duplicate group are
+  reported, and the check runs before ``post_load`` processors.
+
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:

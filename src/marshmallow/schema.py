@@ -43,6 +43,38 @@ if typing.TYPE_CHECKING:
     from marshmallow.fields import Field
 
 
+def _make_hashable(value: typing.Any) -> typing.Hashable:
+    """Recursively convert ``value`` into a hashable form so that it can be
+    used as part of a record identity key.
+    """
+    if isinstance(value, Mapping):
+        return tuple(sorted((k, _make_hashable(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_make_hashable(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_make_hashable(item) for item in value)
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _normalize_unique_by(
+    unique_by: str | types.StrSequenceOrSet | None,
+) -> tuple[str, ...]:
+    """Normalize a ``unique_by`` declaration to a tuple of field names."""
+    if unique_by is None:
+        return ()
+    if isinstance(unique_by, str):
+        return (unique_by,)
+    if not is_collection(unique_by):
+        raise StringNotCollectionError(
+            '"unique_by" should be a string or a collection of strings'
+        )
+    return tuple(unique_by)
+
+
 def _get_fields(attrs) -> list[tuple[str, Field]]:
     """Get fields from a class
 
@@ -220,6 +252,7 @@ class SchemaOpts:
         self.unknown = getattr(meta, "unknown", RAISE)
         self.register = getattr(meta, "register", True)
         self.many = getattr(meta, "many", False)
+        self.unique_by = getattr(meta, "unique_by", ())
 
 
 class Schema(metaclass=SchemaMeta):
@@ -268,12 +301,19 @@ class Schema(metaclass=SchemaMeta):
         will be ignored. Use dot delimiters to specify nested fields.
     :param unknown: Whether to exclude, include, or raise an error for unknown
         fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
+    :param unique_by: Field name(s) identifying a record when loading a
+        collection (``many=True``). If `None`, the value of
+        `Schema.Meta.unique_by` is used. Pass an empty tuple to disable a
+        `unique_by` declared in `class Meta <marshmallow.Schema.Meta>`.
 
     .. versionchanged:: 3.0.0
         Remove ``prefix`` parameter.
 
     .. versionchanged:: 4.0.0
         Remove ``context`` parameter.
+
+    .. versionadded:: 4.4.0
+        Add ``unique_by`` parameter.
     """
 
     TYPE_MAPPING: dict[type, type[Field]] = {
@@ -302,6 +342,14 @@ class Schema(metaclass=SchemaMeta):
     _default_error_messages: dict[str, str] = {
         "type": "Invalid input type.",
         "unknown": "Unknown field.",
+        "unique_by_duplicate": (
+            "Duplicate record for unique field(s) {unique_fields}: "
+            "identical values at indices {indices}."
+        ),
+        "unique_by_missing": (
+            "Cannot determine unique identity: missing, null, or invalid "
+            "value for unique field '{field_name}'."
+        ),
     }
 
     OPTIONS_CLASS: type = SchemaOpts
@@ -375,6 +423,44 @@ class Schema(metaclass=SchemaMeta):
         """
         many: typing.ClassVar[bool]
         """Whether data should be (de)serialized as a collection by default."""
+        unique_by: typing.ClassVar[str | tuple[str, ...] | list[str]]
+        """Field name(s) that identify a record when loading a collection
+        (``many=True``). Identity is computed from the *deserialized* (i.e.
+        fully converted) values of these fields. Entries are resolved against
+        the schema's field names, falling back to each field's ``data_key``.
+        When two or more input records share the same identity, a
+        `ValidationError <marshmallow.exceptions.ValidationError>` is raised
+        reporting all of the original input indices involved, and ``post_load``
+        processors are not run. Records whose identity cannot be determined
+        (missing, ``None``, or failed conversion of a ``unique_by`` field) are
+        never silently merged into a shared identity.
+
+        Example: ::
+
+            class LineItemSchema(Schema):
+                tenant = fields.Str()
+                id = fields.Int(data_key="lineId")
+
+                class Meta:
+                    unique_by = ("tenant", "id")
+
+        With the above schema, loading
+        ``[{"tenant": "a", "lineId": "1"}, {"tenant": "a", "lineId": 1}]``
+        raises an error like: ::
+
+            {
+                0: {"_schema": ["Duplicate record for unique field(s) "
+                                "('tenant', 'lineId'): identical values at "
+                                "indices [0, 1]."]},
+                1: {"_schema": [...]},
+            }
+
+        Nested schemas declared with ``many=True`` check their own
+        collections independently. Schemas that do not declare ``unique_by``
+        are unaffected.
+
+        .. versionadded:: 4.4.0
+        """
         dateformat: typing.ClassVar[str]
         """Default format for `Date <marshmallow.fields.Date>` fields."""
         datetimeformat: typing.ClassVar[str]
@@ -415,6 +501,7 @@ class Schema(metaclass=SchemaMeta):
         dump_only: types.StrSequenceOrSet = (),
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        unique_by: str | types.StrSequenceOrSet | None = None,
     ):
         # Raise error if only or exclude is passed as string, not list of strings
         if only is not None and not is_collection(only):
@@ -424,6 +511,11 @@ class Schema(metaclass=SchemaMeta):
         # copy declared fields from metaclass
         self.declared_fields = copy.deepcopy(self._declared_fields)
         self.many = self.opts.many if many is None else many
+        #: Field name(s) identifying a record when loading with ``many=True``.
+        #: See `Schema.Meta.unique_by`.
+        self.unique_by: tuple[str, ...] = _normalize_unique_by(
+            self.opts.unique_by if unique_by is None else unique_by
+        )
         self.only = only
         self.exclude: set[typing.Any] | typing.MutableSet[typing.Any] = set(
             self.opts.exclude
@@ -440,6 +532,9 @@ class Schema(metaclass=SchemaMeta):
         self.load_fields: dict[str, Field] = {}
         self.dump_fields: dict[str, Field] = {}
         self._init_fields()
+        # Eagerly validate the unique_by contract against the bound fields
+        if self.unique_by:
+            self._resolve_unique_by()
         messages = {}
         messages.update(self._default_error_messages)
         for cls in reversed(self.__class__.__mro__):
@@ -899,6 +994,11 @@ class Schema(metaclass=SchemaMeta):
             self._invoke_field_validators(
                 error_store=error_store, data=result, many=many
             )
+            # Check the unique_by contract for collections. This must run
+            # before any post_load processors construct objects.
+            self._invoke_unique_by_validator(
+                error_store=error_store, data=result, many=many
+            )
             # Run schema-level validation
             if self._hooks[VALIDATES_SCHEMA]:
                 field_errors = bool(error_store.errors)
@@ -1120,6 +1220,96 @@ class Schema(metaclass=SchemaMeta):
             partial=partial,
             unknown=unknown,
         )
+
+    def _resolve_unique_by(self) -> list[tuple[str, Field]]:
+        """Resolve the ``unique_by`` declaration to ``(attr_name, field_obj)``
+        pairs. Entries are matched against load field names first, then against
+        each field's ``data_key``, so the declared paths follow the schema's
+        ``data_key`` mapping.
+
+        This method is private API.
+        """
+        resolved = []
+        for name in self.unique_by:
+            field_obj = self.load_fields.get(name)
+            attr_name = name
+            if field_obj is None:
+                for candidate, candidate_obj in self.load_fields.items():
+                    if candidate_obj.data_key == name:
+                        attr_name, field_obj = candidate, candidate_obj
+                        break
+            if field_obj is None:
+                raise ValueError(
+                    f'"unique_by" field {name!r} does not exist '
+                    f"on {self.__class__.__name__}."
+                )
+            resolved.append((attr_name, field_obj))
+        return resolved
+
+    def _invoke_unique_by_validator(
+        self, *, error_store: ErrorStore, data, many: bool
+    ) -> None:
+        """Enforce the ``unique_by`` contract when loading a collection.
+
+        Identity is computed from the deserialized (converted) values of the
+        declared fields. All original input indices of a duplicate group are
+        reported. Records with a missing, ``None``, or unconvertible identity
+        field are excluded from grouping (never silently merged into a shared
+        identity) and, unless they already carry an error, are reported.
+
+        This method is private API.
+        """
+        if not many or not self.unique_by or not isinstance(data, list):
+            return
+        resolved = self._resolve_unique_by()
+        index_errors = self.opts.index_errors
+        groups: dict[tuple, list[int]] = {}
+        for idx, item in enumerate(data):
+            if not isinstance(item, Mapping):
+                # A type error was already stored for this index.
+                continue
+            identity = []
+            identifiable = True
+            for attr_name, field_obj in resolved:
+                key = field_obj.attribute or attr_name
+                value = get_value(item, key, missing)
+                if value is missing or value is None:
+                    identifiable = False
+                    # Don't pile on if this record already failed validation.
+                    if index_errors and error_store.errors.get(idx):
+                        continue
+                    data_key = (
+                        field_obj.data_key
+                        if field_obj.data_key is not None
+                        else attr_name
+                    )
+                    error_store.store_error(
+                        [
+                            self.error_messages["unique_by_missing"].format(
+                                field_name=data_key
+                            )
+                        ],
+                        data_key,
+                        index=idx if index_errors else None,
+                    )
+                else:
+                    identity.append(_make_hashable(value))
+            if identifiable:
+                groups.setdefault(tuple(identity), []).append(idx)
+        if not groups:
+            return
+        unique_fields = tuple(
+            field_obj.data_key if field_obj.data_key is not None else attr_name
+            for attr_name, field_obj in resolved
+        )
+        for indices in groups.values():
+            if len(indices) < 2:
+                continue
+            message = self.error_messages["unique_by_duplicate"].format(
+                unique_fields=unique_fields, indices=indices
+            )
+            for idx in indices:
+                error_store.store_error([message], index=idx if index_errors else None)
 
     def _invoke_field_validators(self, *, error_store: ErrorStore, data, many: bool):
         for attr_name, _, validator_kwargs in self._hooks[VALIDATES]:
