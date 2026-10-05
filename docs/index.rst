@@ -53,6 +53,7 @@ Usage guide
     quickstart
     nesting
     custom_fields
+    permissions
     extending/index
     examples/index
 

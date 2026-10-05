@@ -602,6 +602,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool = False,
         partial=None,
         unknown: types.UnknownOption = RAISE,
+        permissions: frozenset[str] | None = None,
         index=None,
     ) -> typing.Any | list[typing.Any]:
         """Deserialize ``data``.
@@ -615,6 +616,10 @@ class Schema(metaclass=SchemaMeta):
             will be ignored. Use dot delimiters to specify nested fields.
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
+        :param permissions: The set of permissions granted for this load. Fields
+            that declare required permissions not included in this set are
+            rejected before their deserializers run. Propagates down to
+            ``Nested`` and collection fields.
         :param index: Index of the item being deserialized (for storing errors) if
             deserializing a collection, otherwise `None`.
         :return: The deserialized data as `dict_class` instance or list of `dict_class`
@@ -633,6 +638,7 @@ class Schema(metaclass=SchemaMeta):
                         many=False,
                         partial=partial,
                         unknown=unknown,
+                        permissions=permissions,
                         index=idx,
                     )
                     for idx, d in enumerate(data)
@@ -655,7 +661,7 @@ class Schema(metaclass=SchemaMeta):
                         partial_is_collection and attr_name in partial
                     ):
                         continue
-                d_kwargs = {}
+                d_kwargs: dict[str, typing.Any] = {"permissions": permissions}
                 # Allow partial loading of nested schemas.
                 if partial_is_collection:
                     prefix = attr_name + "."
@@ -711,6 +717,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        permissions: str | types.StrSequenceOrSet | None = None,
     ):
         """Deserialize a data structure to an object defined by this Schema's fields.
 
@@ -724,15 +731,28 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param permissions: The permission (e.g. ``"secret"``) or collection of
+            permissions granted for this load. Fields that declare required
+            permissions not included here are rejected before their
+            deserializers run. The context is per-load and propagates down to
+            ``Nested`` and collection fields.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
             This method returns the deserialized data rather than a ``(data, errors)`` tuple.
             A :exc:`ValidationError <marshmallow.exceptions.ValidationError>` is raised
             if invalid data are passed.
+        .. versionadded:: 4.4.0
+            Add the ``permissions`` argument for granting a per-load permission
+            context.
         """
         return self._do_load(
-            data, many=many, partial=partial, unknown=unknown, postprocess=True
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            permissions=permissions,
+            postprocess=True,
         )
 
     def loads(
@@ -743,6 +763,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        permissions: str | types.StrSequenceOrSet | None = None,
         **kwargs,
     ):
         """Same as :meth:`load`, except it uses `marshmallow.Schema.Meta.render_module` to deserialize
@@ -758,6 +779,8 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param permissions: The permission or collection of permissions granted for
+            this load. See :meth:`load`.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
@@ -768,7 +791,13 @@ class Schema(metaclass=SchemaMeta):
             Rename ``json_module`` parameter to ``s``.
         """
         data = self.opts.render_module.loads(s, **kwargs)
-        return self.load(data, many=many, partial=partial, unknown=unknown)
+        return self.load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            permissions=permissions,
+        )
 
     def _run_validator(
         self,
@@ -818,6 +847,7 @@ class Schema(metaclass=SchemaMeta):
         *,
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
+        permissions: str | types.StrSequenceOrSet | None = None,
     ) -> dict[str, list[str]]:
         """Validate `data` against the schema, returning a dictionary of
         validation errors.
@@ -829,10 +859,18 @@ class Schema(metaclass=SchemaMeta):
             any fields declared. Propagates down to ``Nested`` fields as well. If
             its value is an iterable, only missing fields listed in that iterable
             will be ignored. Use dot delimiters to specify nested fields.
+        :param permissions: The permission or collection of permissions granted for
+            this load. See :meth:`load`.
         :return: A dictionary of validation errors.
         """
         try:
-            self._do_load(data, many=many, partial=partial, postprocess=False)
+            self._do_load(
+                data,
+                many=many,
+                partial=partial,
+                permissions=permissions,
+                postprocess=False,
+            )
         except ValidationError as exc:
             return typing.cast("dict[str, list[str]]", exc.messages)
         return {}
@@ -846,6 +884,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        permissions: str | types.StrSequenceOrSet | None = None,
         postprocess: bool = True,
     ):
         """Deserialize `data`, returning the deserialized result.
@@ -861,6 +900,8 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param permissions: The permission or collection of permissions granted for
+            this load. The context is per-load and is not stored on the schema.
         :param postprocess: Whether to run post_load methods.
         :return: Deserialized data
         """
@@ -870,6 +911,7 @@ class Schema(metaclass=SchemaMeta):
         unknown = self.unknown if unknown is None else unknown
         if partial is None:
             partial = self.partial
+        permissions = ma_fields._normalize_permissions(permissions)
         # Run preprocessors
         if self._hooks[PRE_LOAD]:
             try:
@@ -894,6 +936,7 @@ class Schema(metaclass=SchemaMeta):
                 many=many,
                 partial=partial,
                 unknown=unknown,
+                permissions=permissions,
             )
             # Run field-level validation
             self._invoke_field_validators(

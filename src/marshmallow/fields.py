@@ -100,8 +100,24 @@ class _BaseFieldKwargs(typing.TypedDict, total=False):
     allow_none: bool | None
     load_only: bool
     dump_only: bool
+    permissions: str | types.StrSequenceOrSet | None
     error_messages: types.ErrorMessages | None
     metadata: typing.Mapping[str, typing.Any] | None
+
+
+def _normalize_permissions(
+    permissions: str | typing.Iterable[str] | None,
+) -> frozenset[str]:
+    """Normalize a permission or collection of permissions into a ``frozenset``.
+
+    ``None`` becomes an empty set, a single string becomes a one-element set,
+    and any other iterable becomes a set of strings.
+    """
+    if permissions is None:
+        return frozenset()
+    if isinstance(permissions, str):
+        return frozenset({permissions})
+    return frozenset(permissions)
 
 
 def _resolve_field_instance(cls_or_instance: Field | type[Field]) -> Field:
@@ -158,6 +174,11 @@ class Field(typing.Generic[_InternalT]):
     :param dump_only: If `True` skip this field during deserialization, otherwise
         its value will be present in the deserialized object. In the context of an
         HTTP API, this effectively marks the field as "read-only".
+    :param permissions: A permission or collection of permissions required to load
+        this field during `Schema.load <marshmallow.Schema.load>`. When a load is
+        performed without a permission context that grants all of the field's
+        permissions, the field is rejected before its deserializer is called.
+        Has no effect on serialization.
     :param error_messages: Overrides for `Field.default_error_messages`.
     :param metadata: Extra information to be stored as field metadata.
 
@@ -173,6 +194,8 @@ class Field(typing.Generic[_InternalT]):
         Remove ``context`` property.
     .. versionchanged:: 4.3.0
         Add ``pre_load`` and ``post_load``.
+    .. versionadded:: 4.4.0
+        Add ``permissions`` for declaring permissions required to load a field.
     """
 
     # Some fields, such as Method fields and Function fields, are not expected
@@ -187,6 +210,7 @@ class Field(typing.Generic[_InternalT]):
         "required": "Missing data for required field.",
         "null": "Field may not be null.",
         "validator_failed": "Invalid value.",
+        "permission_denied": "You do not have permission to load this field.",
     }
 
     def __init__(
@@ -207,6 +231,7 @@ class Field(typing.Generic[_InternalT]):
         allow_none: bool | None = None,
         load_only: bool = False,
         dump_only: bool = False,
+        permissions: str | typing.Iterable[str] | None = None,
         error_messages: types.ErrorMessages | None = None,
         metadata: typing.Mapping[str, typing.Any] | None = None,
     ) -> None:
@@ -225,6 +250,7 @@ class Field(typing.Generic[_InternalT]):
         self.allow_none = load_default is None if allow_none is None else allow_none
         self.load_only = load_only
         self.dump_only = dump_only
+        self.permissions = _normalize_permissions(permissions)
         if required is True and load_default is not missing_:
             raise ValueError("'load_default' must not be set for required fields.")
         self.required = required
@@ -381,6 +407,14 @@ class Field(typing.Generic[_InternalT]):
         if value is missing_:
             _miss = self.load_default
             return _miss() if callable(_miss) else _miss
+
+        # Permission check: only runs when a value is present, so missing
+        # fields never trigger permission errors. Reject before any pre_load
+        # function or deserializer runs.
+        if self.permissions:
+            granted = kwargs.get("permissions")
+            if granted is None or not self.permissions.issubset(granted):
+                raise self.make_error("permission_denied")
 
         # Apply pre_load functions
         for func in self.pre_load:
@@ -638,9 +672,15 @@ class Nested(Field):
         self,
         value: typing.Any,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        permissions: frozenset[str] | None = None,
     ):
         try:
-            valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
+            valid_data = self.schema.load(
+                value,
+                unknown=self.unknown,
+                partial=partial,
+                permissions=permissions,
+            )
         except ValidationError as error:
             raise ValidationError(
                 error.messages, valid_data=error.valid_data
@@ -664,7 +704,7 @@ class Nested(Field):
             Add ``partial`` parameter.
         """
         self._test_collection(value)
-        return self._load(value, partial=partial)
+        return self._load(value, partial=partial, permissions=kwargs.get("permissions"))
 
 
 class Pluck(Nested):
@@ -726,7 +766,7 @@ class Pluck(Nested):
             value = [{self._field_data_key: v} for v in value]
         else:
             value = {self._field_data_key: value}
-        return self._load(value, partial=partial)
+        return self._load(value, partial=partial, permissions=kwargs.get("permissions"))
 
 
 class List(Field[list[_InternalT | None]]):

@@ -7,6 +7,13 @@ Changelog
 Features:
 
 - Simplify `get_value` to match actual usage (:pr:`3024`).
+- Add an explicit, per-load permission context. Fields declare required
+  permissions with the ``permissions`` argument, and
+  `Schema.load <marshmallow.Schema.load>` (and ``loads``/``validate``) accept
+  a ``permissions`` argument. Fields whose required permissions are not
+  granted are rejected before their deserializers run. The context is per-load
+  and propagates down to ``Nested`` and collection fields; missing fields are
+  not rejected, and input values are never included in error messages.
 
 Bug fixes:
 
