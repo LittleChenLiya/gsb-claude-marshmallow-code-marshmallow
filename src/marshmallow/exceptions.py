@@ -22,6 +22,9 @@ class ValidationError(MarshmallowError):
     :param field_name: Field name to store the error on.
     :param data: Raw input data.
     :param valid_data: Valid (de)serialized data.
+    :param source: Where the invalid value originated from. ``None`` for a value
+        supplied in the raw input, or ``"default"`` for a value produced by a
+        field's ``load_default`` in ``raw_defaults`` mode.
     """
 
     def __init__(
@@ -32,12 +35,14 @@ class ValidationError(MarshmallowError):
         | typing.Iterable[typing.Mapping[str, typing.Any]]
         | None = None,
         valid_data: list[typing.Any] | dict[str, typing.Any] | None = None,
+        source: str | None = None,
         **kwargs,
     ):
         self.messages = [message] if isinstance(message, (str, bytes)) else message
         self.field_name = field_name
         self.data = data
         self.valid_data = valid_data
+        self.source = source
         self.kwargs = kwargs
         super().__init__(message)
 

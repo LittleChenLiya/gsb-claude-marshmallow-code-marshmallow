@@ -13,8 +13,11 @@ class ErrorStore:
     def __init__(self):
         #: Dictionary of errors stored during serialization
         self.errors = {}
+        #: Mapping of field name -> origin of the invalid value.
+        #: ``"default"`` means the value was produced by a ``load_default``.
+        self.sources: dict[str, str] = {}
 
-    def store_error(self, messages, field_name=SCHEMA, index=None):
+    def store_error(self, messages, field_name=SCHEMA, index=None, source=None):
         # field error  -> store/merge error messages under field name key
         # schema error -> if string or list, store/merge under _schema key
         #              -> if dict, store/merge with other top-level keys
@@ -24,6 +27,8 @@ class ErrorStore:
         if index is not None:
             messages = {index: messages}
         self.errors = merge_errors(self.errors, messages)
+        if source is not None:
+            self.sources[field_name] = source
 
 
 def copy_containers(errors):

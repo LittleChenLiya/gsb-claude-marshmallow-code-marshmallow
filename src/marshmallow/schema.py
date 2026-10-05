@@ -220,6 +220,7 @@ class SchemaOpts:
         self.unknown = getattr(meta, "unknown", RAISE)
         self.register = getattr(meta, "register", True)
         self.many = getattr(meta, "many", False)
+        self.raw_defaults = getattr(meta, "raw_defaults", False)
 
 
 class Schema(metaclass=SchemaMeta):
@@ -404,6 +405,13 @@ class Schema(metaclass=SchemaMeta):
         by class name in `Nested` fields. Only set this to `False` when memory
         usage is critical. Defaults to `True`.
         """
+        raw_defaults: typing.ClassVar[bool]
+        """Whether missing fields that produce a ``load_default`` are deserialized
+        and validated like raw input, instead of being returned untouched. When
+        enabled, a callable default factory is invoked at most once per load and
+        errors raised while processing a default are tagged with
+        ``source="default"``. Defaults to ``False``.
+        """
 
     def __init__(
         self,
@@ -415,6 +423,7 @@ class Schema(metaclass=SchemaMeta):
         dump_only: types.StrSequenceOrSet = (),
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        raw_defaults: bool | None = None,
     ):
         # Raise error if only or exclude is passed as string, not list of strings
         if only is not None and not is_collection(only):
@@ -433,6 +442,9 @@ class Schema(metaclass=SchemaMeta):
         self.partial = partial
         self.unknown: types.UnknownOption = (
             self.opts.unknown if unknown is None else unknown
+        )
+        self.raw_defaults: bool = (
+            self.opts.raw_defaults if raw_defaults is None else raw_defaults
         )
         self._normalize_nested_options()
         #: Dictionary mapping field_names -> :class:`Field` objects
@@ -521,7 +533,9 @@ class Schema(metaclass=SchemaMeta):
         try:
             value = getter_func(data)
         except ValidationError as error:
-            error_store.store_error(error.messages, field_name, index=index)
+            error_store.store_error(
+                error.messages, field_name, index=index, source=error.source
+            )
             # When a Nested field fails validation, the marshalled data is stored
             # on the ValidationError's valid_data attribute
             return error.valid_data or missing
@@ -602,6 +616,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool = False,
         partial=None,
         unknown: types.UnknownOption = RAISE,
+        raw_defaults: bool = False,
         index=None,
     ) -> typing.Any | list[typing.Any]:
         """Deserialize ``data``.
@@ -615,6 +630,9 @@ class Schema(metaclass=SchemaMeta):
             will be ignored. Use dot delimiters to specify nested fields.
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
+        :param raw_defaults: Whether missing fields that produce a
+            ``load_default`` are deserialized and validated like raw input.
+            Propagates down to ``Nested`` fields as well.
         :param index: Index of the item being deserialized (for storing errors) if
             deserializing a collection, otherwise `None`.
         :return: The deserialized data as `dict_class` instance or list of `dict_class`
@@ -633,6 +651,7 @@ class Schema(metaclass=SchemaMeta):
                         many=False,
                         partial=partial,
                         unknown=unknown,
+                        raw_defaults=raw_defaults,
                         index=idx,
                     )
                     for idx, d in enumerate(data)
@@ -655,7 +674,7 @@ class Schema(metaclass=SchemaMeta):
                         partial_is_collection and attr_name in partial
                     ):
                         continue
-                d_kwargs = {}
+                d_kwargs: dict[str, typing.Any] = {}
                 # Allow partial loading of nested schemas.
                 if partial_is_collection:
                     prefix = attr_name + "."
@@ -666,6 +685,7 @@ class Schema(metaclass=SchemaMeta):
                     d_kwargs["partial"] = sub_partial
                 elif partial is not None:
                     d_kwargs["partial"] = partial
+                d_kwargs["raw_defaults"] = raw_defaults
 
                 def getter(
                     val, field_obj=field_obj, field_name=field_name, d_kwargs=d_kwargs
@@ -711,6 +731,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        raw_defaults: bool | None = None,
     ):
         """Deserialize a data structure to an object defined by this Schema's fields.
 
@@ -724,6 +745,9 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param raw_defaults: Whether missing fields that produce a
+            ``load_default`` are deserialized and validated like raw input.
+            If `None`, the value for `self.raw_defaults` is used.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
@@ -732,7 +756,12 @@ class Schema(metaclass=SchemaMeta):
             if invalid data are passed.
         """
         return self._do_load(
-            data, many=many, partial=partial, unknown=unknown, postprocess=True
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            raw_defaults=raw_defaults,
+            postprocess=True,
         )
 
     def loads(
@@ -743,6 +772,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        raw_defaults: bool | None = None,
         **kwargs,
     ):
         """Same as :meth:`load`, except it uses `marshmallow.Schema.Meta.render_module` to deserialize
@@ -758,6 +788,9 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param raw_defaults: Whether missing fields that produce a
+            ``load_default`` are deserialized and validated like raw input.
+            If `None`, the value for `self.raw_defaults` is used.
         :return: Deserialized data
 
         .. versionchanged:: 3.0.0b7
@@ -768,7 +801,13 @@ class Schema(metaclass=SchemaMeta):
             Rename ``json_module`` parameter to ``s``.
         """
         data = self.opts.render_module.loads(s, **kwargs)
-        return self.load(data, many=many, partial=partial, unknown=unknown)
+        return self.load(
+            data,
+            many=many,
+            partial=partial,
+            unknown=unknown,
+            raw_defaults=raw_defaults,
+        )
 
     def _run_validator(
         self,
@@ -818,6 +857,7 @@ class Schema(metaclass=SchemaMeta):
         *,
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
+        raw_defaults: bool | None = None,
     ) -> dict[str, list[str]]:
         """Validate `data` against the schema, returning a dictionary of
         validation errors.
@@ -829,10 +869,19 @@ class Schema(metaclass=SchemaMeta):
             any fields declared. Propagates down to ``Nested`` fields as well. If
             its value is an iterable, only missing fields listed in that iterable
             will be ignored. Use dot delimiters to specify nested fields.
+        :param raw_defaults: Whether missing fields that produce a
+            ``load_default`` are deserialized and validated like raw input.
+            If `None`, the value for `self.raw_defaults` is used.
         :return: A dictionary of validation errors.
         """
         try:
-            self._do_load(data, many=many, partial=partial, postprocess=False)
+            self._do_load(
+                data,
+                many=many,
+                partial=partial,
+                raw_defaults=raw_defaults,
+                postprocess=False,
+            )
         except ValidationError as exc:
             return typing.cast("dict[str, list[str]]", exc.messages)
         return {}
@@ -846,6 +895,7 @@ class Schema(metaclass=SchemaMeta):
         many: bool | None = None,
         partial: bool | types.StrSequenceOrSet | None = None,
         unknown: types.UnknownOption | None = None,
+        raw_defaults: bool | None = None,
         postprocess: bool = True,
     ):
         """Deserialize `data`, returning the deserialized result.
@@ -861,6 +911,9 @@ class Schema(metaclass=SchemaMeta):
         :param unknown: Whether to exclude, include, or raise an error for unknown
             fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
             If `None`, the value for `self.unknown` is used.
+        :param raw_defaults: Whether missing fields that produce a
+            ``load_default`` are deserialized and validated like raw input.
+            If `None`, the value for `self.raw_defaults` is used.
         :param postprocess: Whether to run post_load methods.
         :return: Deserialized data
         """
@@ -868,6 +921,7 @@ class Schema(metaclass=SchemaMeta):
         errors: dict[str, list[str]] = {}
         many = self.many if many is None else bool(many)
         unknown = self.unknown if unknown is None else unknown
+        raw_defaults = self.raw_defaults if raw_defaults is None else raw_defaults
         if partial is None:
             partial = self.partial
         # Run preprocessors
@@ -894,6 +948,7 @@ class Schema(metaclass=SchemaMeta):
                 many=many,
                 partial=partial,
                 unknown=unknown,
+                raw_defaults=raw_defaults,
             )
             # Run field-level validation
             self._invoke_field_validators(
@@ -937,7 +992,12 @@ class Schema(metaclass=SchemaMeta):
                 except ValidationError as err:
                     errors = err.normalized_messages()
         if errors:
-            exc = ValidationError(errors, data=data, valid_data=result)
+            source = (
+                "default"
+                if any(s == "default" for s in error_store.sources.values())
+                else None
+            )
+            exc = ValidationError(errors, data=data, valid_data=result, source=source)
             self.handle_error(exc, data, many=many, partial=partial)
             raise exc
 

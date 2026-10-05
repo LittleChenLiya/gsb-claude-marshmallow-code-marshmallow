@@ -118,6 +118,38 @@ def _resolve_field_instance(cls_or_instance: Field | type[Field]) -> Field:
     return cls_or_instance
 
 
+#: Prefix added to error messages that originate from a field's ``load_default``
+#: when ``raw_defaults`` mode is enabled.
+_DEFAULT_ERROR_PREFIX = "[default] "
+
+
+def _tag_default_error(error: ValidationError) -> None:
+    """Mark a :class:`ValidationError` as originating from a default value.
+
+    Sets ``error.source`` to ``"default"`` and prefixes each string message so
+    that the origin is visible in the standard error dictionary (including
+    errors nested inside ``Nested`` fields).
+    """
+    error.source = "default"
+    messages = error.messages
+    if isinstance(messages, dict):
+        error.messages = {
+            key: _tag_default_message(value) for key, value in messages.items()
+        }
+    else:
+        error.messages = _tag_default_message(messages)
+
+
+def _tag_default_message(message: typing.Any) -> typing.Any:
+    if isinstance(message, list):
+        return [_tag_default_message(item) for item in message]
+    if isinstance(message, dict):
+        return {key: _tag_default_message(value) for key, value in message.items()}
+    if isinstance(message, str):
+        return _DEFAULT_ERROR_PREFIX + message
+    return message
+
+
 class Field(typing.Generic[_InternalT]):
     """Base field from which all other fields inherit.
     This class should not be used directly within Schemas.
@@ -346,6 +378,7 @@ class Field(typing.Generic[_InternalT]):
         value: None,
         attr: str | None = None,
         data: typing.Mapping[str, typing.Any] | None = None,
+        raw_defaults: bool = False,
         **kwargs,
     ) -> _InternalT | None: ...
 
@@ -356,6 +389,7 @@ class Field(typing.Generic[_InternalT]):
         value: typing.Any,
         attr: str | None = None,
         data: typing.Mapping[str, typing.Any] | None = None,
+        raw_defaults: bool = False,
         **kwargs,
     ) -> _InternalT: ...
 
@@ -364,6 +398,7 @@ class Field(typing.Generic[_InternalT]):
         value: typing.Any,
         attr: str | None = None,
         data: typing.Mapping[str, typing.Any] | None = None,
+        raw_defaults: bool = False,
         **kwargs,
     ) -> _InternalT | None:
         """Deserialize ``value``.
@@ -371,6 +406,11 @@ class Field(typing.Generic[_InternalT]):
         :param value: The value to deserialize.
         :param attr: The attribute/key in `data` to deserialize.
         :param data: The raw input data passed to `Schema.load <marshmallow.Schema.load>`.
+        :param raw_defaults: If `True` and ``value`` is missing, resolve the
+            field's ``load_default`` (calling the factory at most once) and
+            deserialize and validate the resulting value as though it were raw
+            input, instead of returning the default untouched. Errors raised
+            while processing a default value are tagged with ``source="default"``.
         :param kwargs: Field-specific keyword arguments.
         :raise ValidationError: If an invalid value is passed or if a required value
             is missing.
@@ -380,7 +420,25 @@ class Field(typing.Generic[_InternalT]):
         self._validate_missing(value)
         if value is missing_:
             _miss = self.load_default
-            return _miss() if callable(_miss) else _miss
+            if not raw_defaults or _miss is missing_:
+                return _miss() if callable(_miss) else _miss
+            # Resolve the default exactly once so a callable factory is
+            # invoked at most a single time per deserialization.
+            default_value = _miss() if callable(_miss) else _miss
+            if default_value is missing_:
+                # A factory that produces no value is treated as if no
+                # default were set: the field is excluded from the output.
+                return default_value
+            # Re-apply the missing/null rule to the resolved default so that
+            # a default of ``None`` honours ``allow_none`` just like raw input.
+            try:
+                self._validate_missing(default_value)
+                return self._deserialize_default(
+                    default_value, attr, data, **kwargs
+                )
+            except ValidationError as error:
+                _tag_default_error(error)
+                raise
 
         # Apply pre_load functions
         for func in self.pre_load:
@@ -394,6 +452,32 @@ class Field(typing.Generic[_InternalT]):
         self._validate(output)
 
         # Apply post_load functions
+        for func in self.post_load:
+            output = func(output)
+        return output
+
+    def _deserialize_default(
+        self,
+        value: typing.Any,
+        attr: str | None,
+        data: typing.Mapping[str, typing.Any] | None,
+        **kwargs,
+    ) -> _InternalT | None:
+        """Deserialize and validate a resolved ``load_default`` value.
+
+        Mirrors the raw-input pipeline (``pre_load``, ``_deserialize``,
+        validators and ``post_load``) so that defaults are converted and
+        validated exactly like values supplied in the input data.
+        """
+        for func in self.pre_load:
+            value = func(value)
+
+        if self.allow_none and value is None:
+            return None
+
+        output = self._deserialize(value, attr, data, **kwargs)
+        self._validate(output)
+
         for func in self.post_load:
             output = func(output)
         return output
@@ -526,6 +610,9 @@ class Nested(Field):
         If `True | False`, nested `[nested_field].schema.many` is overridden.
     :param unknown: Whether to exclude, include, or raise an error for unknown
         fields in the data. Use `EXCLUDE`, `INCLUDE` or `RAISE`.
+    :param raw_defaults: Whether missing fields that produce a ``load_default``
+        are deserialized and validated like raw input. If ``None`` (default), the
+        value is inherited from the parent `Schema <marshmallow.Schema>`.
     :param kwargs: The same keyword arguments that :class:`Field` receives.
     """
 
@@ -546,6 +633,7 @@ class Nested(Field):
         exclude: types.StrSequenceOrSet = (),
         many: bool | None = None,
         unknown: types.UnknownOption | None = None,
+        raw_defaults: bool | None = None,
         **kwargs: Unpack[_BaseFieldKwargs],
     ):
         # Raise error if only or exclude is passed as string, not list of strings
@@ -560,6 +648,7 @@ class Nested(Field):
         self.exclude = exclude
         self.many = many
         self.unknown = unknown
+        self.raw_defaults = raw_defaults
         self._schema: Schema | None = None  # Cached Schema instance
         super().__init__(**kwargs)
 
@@ -638,9 +727,15 @@ class Nested(Field):
         self,
         value: typing.Any,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        raw_defaults: bool | None = None,
     ):
         try:
-            valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
+            valid_data = self.schema.load(
+                value,
+                unknown=self.unknown,
+                partial=partial,
+                raw_defaults=raw_defaults,
+            )
         except ValidationError as error:
             raise ValidationError(
                 error.messages, valid_data=error.valid_data
@@ -653,18 +748,25 @@ class Nested(Field):
         attr: str | None,
         data: typing.Mapping[str, typing.Any] | None,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        raw_defaults: bool | None = None,
         **kwargs,
     ):
         """Same as :meth:`Field._deserialize` with additional ``partial`` argument.
 
         :param partial: For nested schemas, the ``partial``
             parameter passed to `marshmallow.Schema.load`.
+        :param raw_defaults: For nested schemas, the ``raw_defaults``
+            parameter passed to `marshmallow.Schema.load`. If the field
+            declares its own ``raw_defaults`` value, it takes precedence over
+            the value inherited from the parent schema.
 
         .. versionchanged:: 3.0.0
             Add ``partial`` parameter.
         """
         self._test_collection(value)
-        return self._load(value, partial=partial)
+        if self.raw_defaults is not None:
+            raw_defaults = self.raw_defaults
+        return self._load(value, partial=partial, raw_defaults=raw_defaults)
 
 
 class Pluck(Nested):
@@ -720,13 +822,23 @@ class Pluck(Nested):
             return utils.pluck(ret, key=self._field_data_key)
         return ret[self._field_data_key]
 
-    def _deserialize(self, value, attr, data, partial=None, **kwargs):
+    def _deserialize(
+        self,
+        value: typing.Any,
+        attr: str | None,
+        data: typing.Mapping[str, typing.Any] | None,
+        partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        raw_defaults: bool | None = None,
+        **kwargs,
+    ):
         self._test_collection(value)
         if self.many:
             value = [{self._field_data_key: v} for v in value]
         else:
             value = {self._field_data_key: value}
-        return self._load(value, partial=partial)
+        if self.raw_defaults is not None:
+            raw_defaults = self.raw_defaults
+        return self._load(value, partial=partial, raw_defaults=raw_defaults)
 
 
 class List(Field[list[_InternalT | None]]):
