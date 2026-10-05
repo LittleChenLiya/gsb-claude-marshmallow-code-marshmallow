@@ -6,6 +6,11 @@ Changelog
 
 Features:
 
+- Add explicit per-load permission context. Fields may declare
+  ``load_permissions``, and ``Schema.load``/``loads``/``validate`` accept a
+  ``permissions`` argument. Unauthorized fields are rejected before
+  deserialization; the context is inherited by nested schemas and
+  collections and never mutates schema state.
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:

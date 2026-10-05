@@ -52,6 +52,7 @@ Usage guide
     install
     quickstart
     nesting
+    load_permissions
     custom_fields
     extending/index
     examples/index

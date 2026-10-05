@@ -100,6 +100,7 @@ class _BaseFieldKwargs(typing.TypedDict, total=False):
     allow_none: bool | None
     load_only: bool
     dump_only: bool
+    load_permissions: typing.Iterable[str] | None
     error_messages: types.ErrorMessages | None
     metadata: typing.Mapping[str, typing.Any] | None
 
@@ -158,6 +159,13 @@ class Field(typing.Generic[_InternalT]):
     :param dump_only: If `True` skip this field during deserialization, otherwise
         its value will be present in the deserialized object. In the context of an
         HTTP API, this effectively marks the field as "read-only".
+    :param load_permissions: Permission names required to deserialize this field.
+        During `Schema.load <marshmallow.Schema.load>`, if the input data contains
+        a value for this field and the permissions granted for that load call do
+        not cover every name declared here, the field is rejected with a
+        permission error *before* its deserializer runs. Missing input values do
+        not trigger the permission check. Permissions are granted per ``load``
+        call via the ``permissions`` argument and are inherited by nested schemas.
     :param error_messages: Overrides for `Field.default_error_messages`.
     :param metadata: Extra information to be stored as field metadata.
 
@@ -207,6 +215,7 @@ class Field(typing.Generic[_InternalT]):
         allow_none: bool | None = None,
         load_only: bool = False,
         dump_only: bool = False,
+        load_permissions: typing.Iterable[str] | None = None,
         error_messages: types.ErrorMessages | None = None,
         metadata: typing.Mapping[str, typing.Any] | None = None,
     ) -> None:
@@ -225,6 +234,10 @@ class Field(typing.Generic[_InternalT]):
         self.allow_none = load_default is None if allow_none is None else allow_none
         self.load_only = load_only
         self.dump_only = dump_only
+        #: Permission names required to deserialize this field. Checked against
+        #: the per-load permission context passed to
+        #: `Schema.load <marshmallow.Schema.load>`.
+        self.load_permissions = frozenset(load_permissions or ())
         if required is True and load_default is not missing_:
             raise ValueError("'load_default' must not be set for required fields.")
         self.required = required
@@ -638,9 +651,12 @@ class Nested(Field):
         self,
         value: typing.Any,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        permissions: typing.AbstractSet[str] | None = None,
     ):
         try:
-            valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
+            valid_data = self.schema.load(
+                value, unknown=self.unknown, partial=partial, permissions=permissions
+            )
         except ValidationError as error:
             raise ValidationError(
                 error.messages, valid_data=error.valid_data
@@ -653,18 +669,21 @@ class Nested(Field):
         attr: str | None,
         data: typing.Mapping[str, typing.Any] | None,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        permissions: typing.AbstractSet[str] | None = None,
         **kwargs,
     ):
         """Same as :meth:`Field._deserialize` with additional ``partial`` argument.
 
         :param partial: For nested schemas, the ``partial``
             parameter passed to `marshmallow.Schema.load`.
+        :param permissions: The permission context granted for the current
+            `marshmallow.Schema.load` call. Inherited by the nested schema.
 
         .. versionchanged:: 3.0.0
             Add ``partial`` parameter.
         """
         self._test_collection(value)
-        return self._load(value, partial=partial)
+        return self._load(value, partial=partial, permissions=permissions)
 
 
 class Pluck(Nested):
