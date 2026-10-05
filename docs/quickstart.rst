@@ -413,6 +413,41 @@ Likewise, `dump_default` specifies the default serialization value.
     UserSchema().dump({})
     # {'birthdate': '2017-09-29T00:00:00+00:00'}
 
+.. _raw_defaults:
+
+Validating default values
+-------------------------
+
+By default, ``load_default`` values are used as-is: they are not
+deserialized or validated. Enable the explicit ``raw_defaults`` mode to treat
+default values like ordinary raw input, so they pass through the normal
+deserialization and validation pipeline. The mode can be enabled per load,
+per schema instance, or via ``Meta``, and propagates to ``Nested`` fields and
+collections.
+
+.. code-block:: python
+
+    class CartSchema(Schema):
+        quantity = fields.Integer(load_default="12")
+        ratio = fields.Float(load_default="0.5")
+
+
+    CartSchema().load({})
+    # {'quantity': '12', 'ratio': '0.5'}  # defaults used as-is
+    CartSchema().load({}, raw_defaults=True)
+    # {'quantity': 12, 'ratio': 0.5}  # defaults converted like raw input
+
+In ``raw_defaults`` mode:
+
+- A callable default is invoked at most once per load, and fields skipped by
+  ``partial`` never invoke it.
+- A default of `None` follows the field's ``allow_none`` rules; a default of
+  ``marshmallow.missing`` omits the field from the output.
+- Validation errors on default values are tagged with their source, e.g.
+  ``{"quantity": ["Default value: Must be greater than or equal to 1."]}``.
+
+.. versionadded:: 4.4.0
+
 .. _unknown:
 
 Handling unknown fields

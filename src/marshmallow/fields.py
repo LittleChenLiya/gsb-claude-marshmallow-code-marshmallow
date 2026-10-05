@@ -638,9 +638,15 @@ class Nested(Field):
         self,
         value: typing.Any,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        raw_defaults: bool | None = None,  # noqa: FBT001
     ):
         try:
-            valid_data = self.schema.load(value, unknown=self.unknown, partial=partial)
+            valid_data = self.schema.load(
+                value,
+                unknown=self.unknown,
+                partial=partial,
+                raw_defaults=raw_defaults,
+            )
         except ValidationError as error:
             raise ValidationError(
                 error.messages, valid_data=error.valid_data
@@ -653,18 +659,24 @@ class Nested(Field):
         attr: str | None,
         data: typing.Mapping[str, typing.Any] | None,
         partial: bool | types.StrSequenceOrSet | None = None,  # noqa: FBT001
+        raw_defaults: bool | None = None,  # noqa: FBT001
         **kwargs,
     ):
-        """Same as :meth:`Field._deserialize` with additional ``partial`` argument.
+        """Same as :meth:`Field._deserialize` with additional ``partial`` and
+        ``raw_defaults`` arguments.
 
         :param partial: For nested schemas, the ``partial``
+            parameter passed to `marshmallow.Schema.load`.
+        :param raw_defaults: For nested schemas, the ``raw_defaults``
             parameter passed to `marshmallow.Schema.load`.
 
         .. versionchanged:: 3.0.0
             Add ``partial`` parameter.
+        .. versionchanged:: 4.4.0
+            Add ``raw_defaults`` parameter.
         """
         self._test_collection(value)
-        return self._load(value, partial=partial)
+        return self._load(value, partial=partial, raw_defaults=raw_defaults)
 
 
 class Pluck(Nested):

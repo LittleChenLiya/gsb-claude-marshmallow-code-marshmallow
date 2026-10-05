@@ -6,6 +6,14 @@ Changelog
 
 Features:
 
+- Add explicit ``raw_defaults`` mode. When enabled (via
+  ``Schema.Meta.raw_defaults``, ``Schema(raw_defaults=...)``, or
+  ``Schema.load(..., raw_defaults=True)``), ``load_default`` values produced
+  for missing fields are deserialized and validated like ordinary raw input
+  instead of bypassing validation. The mode propagates to ``Nested`` fields
+  and ``many=True`` collections, fields skipped by ``partial`` never invoke
+  default factories, and validation errors on default values are tagged with
+  their default source.
 - Simplify `get_value` to match actual usage (:pr:`3024`).
 
 Bug fixes:
